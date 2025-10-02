@@ -1129,6 +1129,48 @@ class WorkerEmailTest(LuigiTestCase):
         self.assertTrue(emails[0].find("Luigi: %s failed scheduling" % (a,)) != -1)
         self.assertFalse(a.has_run)
 
+    @with_config({'batch_email': {'email_interval': '0'}, 'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_complete_error_email_batch(self, emails):
+        class A(DummyTask):
+            def complete(self):
+                raise Exception("b0rk")
+
+        scheduler = Scheduler(batch_emails=True)
+        worker = Worker(scheduler)
+        a = A()
+        self.assertEqual(emails, [])
+        worker.add(a)
+        self.assertEqual(emails, [])
+        worker.run()
+        self.assertEqual(emails, [])
+        self.assertFalse(a.has_run)
+        scheduler.prune()
+        self.assertTrue("1 scheduling failure" in emails[0])
+
+    @with_config({'batch_email': {'email_interval': '0'}, 'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_complete_error_email_batch_to_owner(self, emails):
+        class A(DummyTask):
+            owner_email = 'a_owner@test.com'
+
+            def complete(self):
+                raise Exception("b0rk")
+
+        scheduler = Scheduler(batch_emails=True)
+        worker = Worker(scheduler)
+        a = A()
+        self.assertEqual(emails, [])
+        worker.add(a)
+        self.assertEqual(emails, [])
+        worker.run()
+        self.assertEqual(emails, [])
+        self.assertFalse(a.has_run)
+        scheduler.prune()
+        self.assertTrue(any(
+            "1 scheduling failure" in email and 'a_owner@test.com' in email
+            for email in emails))
+
     @email_patch
     def test_requires_error(self, emails):
         class A(DummyTask):
@@ -1142,6 +1184,25 @@ class WorkerEmailTest(LuigiTestCase):
         self.assertTrue(emails[0].find("Luigi: %s failed scheduling" % (a,)) != -1)
         self.worker.run()
         self.assertFalse(a.has_run)
+
+    @with_config({'batch_email': {'email_interval': '0'}, 'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_requires_error_email_batch(self, emails):
+        class A(DummyTask):
+
+            def requires(self):
+                raise Exception("b0rk")
+
+        scheduler = Scheduler(batch_emails=True)
+        worker = Worker(scheduler)
+        a = A()
+        self.assertEqual(emails, [])
+        worker.add(a)
+        self.assertEqual(emails, [])
+        worker.run()
+        self.assertFalse(a.has_run)
+        scheduler.prune()
+        self.assertTrue("1 scheduling failure" in emails[0])
 
     @email_patch
     def test_complete_return_value(self, emails):
@@ -1158,6 +1219,26 @@ class WorkerEmailTest(LuigiTestCase):
         self.assertTrue(emails[0].find("Luigi: %s failed scheduling" % (a,)) != -1)
         self.assertFalse(a.has_run)
 
+    @with_config({'batch_email': {'email_interval': '0'}, 'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_complete_return_value_email_batch(self, emails):
+        class A(DummyTask):
+
+            def complete(self):
+                pass  # no return value should be an error
+
+        scheduler = Scheduler(batch_emails=True)
+        worker = Worker(scheduler)
+        a = A()
+        self.assertEqual(emails, [])
+        worker.add(a)
+        self.assertEqual(emails, [])
+        self.worker.run()
+        self.assertEqual(emails, [])
+        self.assertFalse(a.has_run)
+        scheduler.prune()
+        self.assertTrue("1 scheduling failure" in emails[0])
+
     @email_patch
     def test_run_error(self, emails):
         class A(luigi.Task):
@@ -1165,17 +1246,66 @@ class WorkerEmailTest(LuigiTestCase):
                 raise Exception("b0rk")
 
         a = A()
-        self.worker.add(a)
-        self.assertEqual(emails, [])
-        self.worker.run()
+        luigi.build([a], workers=1, local_scheduler=True)
+        self.assertEqual(1, len(emails))
         self.assertTrue(emails[0].find("Luigi: %s FAILED" % (a,)) != -1)
 
+    @with_config({'batch_email': {'email_interval': '0'}, 'worker': {'send_failure_email': 'False'}})
     @email_patch
-    def test_task_process_dies(self, emails):
+    def test_run_error_email_batch(self, emails):
+        class A(luigi.Task):
+            owner_email = ['a@test.com', 'b@test.com']
+
+            def run(self):
+                raise Exception("b0rk")
+        scheduler = Scheduler(batch_emails=True)
+        worker = Worker(scheduler)
+        worker.add(A())
+        worker.run()
+        scheduler.prune()
+        self.assertEqual(3, len(emails))
+        self.assertTrue(any('a@test.com' in email for email in emails))
+        self.assertTrue(any('b@test.com' in email for email in emails))
+
+    @with_config({'batch_email': {'email_interval': '0'}, 'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_run_error_batch_email_string(self, emails):
+        class A(luigi.Task):
+            owner_email = 'a@test.com'
+
+            def run(self):
+                raise Exception("b0rk")
+        scheduler = Scheduler(batch_emails=True)
+        worker = Worker(scheduler)
+        worker.add(A())
+        worker.run()
+        scheduler.prune()
+        self.assertEqual(2, len(emails))
+        self.assertTrue(any('a@test.com' in email for email in emails))
+
+    @with_config({'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_run_error_no_email(self, emails):
+        class A(luigi.Task):
+            def run(self):
+                raise Exception("b0rk")
+
+        luigi.build([A()], workers=1, local_scheduler=True)
+        self.assertFalse(emails)
+
+    @email_patch
+    def test_task_process_dies_with_email(self, emails):
         a = SendSignalTask(signal.SIGKILL)
         luigi.build([a], workers=2, local_scheduler=True)
+        self.assertEqual(1, len(emails))
         self.assertTrue(emails[0].find("Luigi: %s FAILED" % (a,)) != -1)
         self.assertTrue(emails[0].find("died unexpectedly with exit code -9") != -1)
+
+    @with_config({'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_task_process_dies_no_email(self, emails):
+        luigi.build([SendSignalTask(signal.SIGKILL)], workers=2, local_scheduler=True)
+        self.assertEqual([], emails)
 
     @email_patch
     def test_task_times_out(self, emails):
@@ -1187,8 +1317,21 @@ class WorkerEmailTest(LuigiTestCase):
 
         a = A()
         luigi.build([a], workers=2, local_scheduler=True)
+        self.assertEqual(1, len(emails))
         self.assertTrue(emails[0].find("Luigi: %s FAILED" % (a,)) != -1)
         self.assertTrue(emails[0].find("timed out after 0.0001 seconds and was terminated.") != -1)
+
+    @with_config({'worker': {'send_failure_email': 'False'}})
+    @email_patch
+    def test_task_times_out_no_email(self, emails):
+        class A(luigi.Task):
+            worker_timeout = 0.0001
+
+            def run(self):
+                time.sleep(5)
+
+        luigi.build([A()], workers=2, local_scheduler=True)
+        self.assertEqual([], emails)
 
     @with_config(dict(worker=dict(retry_external_tasks='true')))
     @email_patch
