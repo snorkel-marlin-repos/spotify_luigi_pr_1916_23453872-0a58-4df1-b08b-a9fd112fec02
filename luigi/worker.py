@@ -338,6 +338,9 @@ class worker(Config):
                                          config_path=dict(section='core', name='retry-external-tasks'),
                                          description='If true, incomplete external tasks will be '
                                          'retested for completion while Luigi is running.')
+    send_failure_email = BoolParameter(default=True,
+                                       description='If true, send e-mails directly from the worker'
+                                                   'on failure')
     no_install_shutdown_handler = BoolParameter(default=False,
                                                 description='If true, the SIGUSR1 shutdown handler will'
                                                 'NOT be install on the worker')
@@ -443,6 +446,7 @@ class Worker(object):
         if task:
             msg = (task, status, runnable)
             self._add_task_history.append(msg)
+            kwargs['owners'] = task._owner_list()
 
         if task_id in self._batch_running_tasks:
             for batch_task in self._batch_running_tasks.pop(task_id):
@@ -516,29 +520,52 @@ class Worker(object):
     def _log_unexpected_error(self, task):
         logger.exception("Luigi unexpected framework error while scheduling %s", task)  # needs to be called from within except clause
 
+    def _announce_scheduling_failure(self, task, expl):
+        try:
+            self._scheduler.announce_scheduling_failure(
+                worker=self._id,
+                task_name=str(task),
+                family=task.task_family,
+                params=task.to_str_params(only_significant=True),
+                expl=expl,
+                owners=task._owner_list(),
+            )
+        except Exception:
+            raise
+            formatted_traceback = traceback.format_exc()
+            self._email_unexpected_error(task, formatted_traceback)
+
     def _email_complete_error(self, task, formatted_traceback):
-        self._email_error(task, formatted_traceback,
-                          subject="Luigi: {task} failed scheduling. Host: {host}",
-                          headline="Will not run {task} or any dependencies due to error in complete() method",
-                          )
+        self._announce_scheduling_failure(task, formatted_traceback)
+        if self._config.send_failure_email:
+            self._email_error(task, formatted_traceback,
+                              subject="Luigi: {task} failed scheduling. Host: {host}",
+                              headline="Will not run {task} or any dependencies due to error in complete() method",
+                              )
 
     def _email_dependency_error(self, task, formatted_traceback):
-        self._email_error(task, formatted_traceback,
-                          subject="Luigi: {task} failed scheduling. Host: {host}",
-                          headline="Will not run {task} or any dependencies due to error in deps() method",
-                          )
+        self._announce_scheduling_failure(task, formatted_traceback)
+        if self._config.send_failure_email:
+            self._email_error(task, formatted_traceback,
+                              subject="Luigi: {task} failed scheduling. Host: {host}",
+                              headline="Will not run {task} or any dependencies due to error in deps() method",
+                              )
 
     def _email_unexpected_error(self, task, formatted_traceback):
+        # this sends even if failure e-mails are disabled, as they may indicate
+        # a more severe failure that may not reach other alerting methods such
+        # as scheduler batch notification
         self._email_error(task, formatted_traceback,
                           subject="Luigi: Framework error while scheduling {task}. Host: {host}",
                           headline="Luigi framework error",
                           )
 
     def _email_task_failure(self, task, formatted_traceback):
-        self._email_error(task, formatted_traceback,
-                          subject="Luigi: {task} FAILED. Host: {host}",
-                          headline="A task failed when running. Most likely run() raised an exception.",
-                          )
+        if self._config.send_failure_email:
+            self._email_error(task, formatted_traceback,
+                              subject="Luigi: {task} FAILED. Host: {host}",
+                              headline="A task failed when running. Most likely run() raised an exception.",
+                              )
 
     def _email_error(self, task, formatted_traceback, subject, headline):
         formatted_subject = subject.format(task=task, host=self.host)
